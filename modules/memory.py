@@ -46,6 +46,7 @@ class MemoryManager:
         self.index: Optional[faiss.IndexFlatL2] = None
         self.data: List[MemoryItem] = []
         self.embeddings: List[np.ndarray] = []
+        self.memory_enabled = False
 
     def _get_embedding(self, text: str) -> np.ndarray:
         response = requests.post(

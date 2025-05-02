@@ -82,12 +82,15 @@ class AgentLoop:
                 print(f"[perception] Intent: {perception.intent}, Hint: {perception.tool_hint}")
 
                 # 💾 Memory Retrieval
-                retrieved = self.context.memory.retrieve(
-                    query=query,
-                    top_k=self.context.agent_profile.memory_config["top_k"],
-                    type_filter=self.context.agent_profile.memory_config.get("type_filter", None),
-                    session_filter=self.context.session_id
-                )
+                if self.context.memory.memory_enabled:
+                    retrieved = self.context.memory.retrieve(
+                        query=query,
+                        top_k=self.context.agent_profile.memory_config["top_k"],
+                        type_filter=self.context.agent_profile.memory_config.get("type_filter", None),
+                        session_filter=self.context.session_id
+                    )
+                else:
+                    retrieved = []
                 print(f"[memory] Retrieved {len(retrieved)} memories")
 
                 # 📊 Planning (via strategy)

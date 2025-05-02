@@ -72,7 +72,8 @@ class AgentContext:
 
     def add_memory(self, item: MemoryItem):
         self.memory_trace.append(item)
-        self.memory.add(item)
+        if getattr(self.memory, "memory_enabled", True):
+            self.memory.add(item)
 
     def __repr__(self):
         return f"<AgentContext step={self.step}, session_id={self.session_id}>"

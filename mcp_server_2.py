@@ -218,30 +218,36 @@ def ensure_faiss_ready():
 def create_and_share_sheet(data: list, email: str) -> str:
     """Create a new Google Sheet, write data, and share it. Usage: create_and_share_sheet|data=[["Header1", "Header2"], ["Data1", "Data2"]]|email="example@example.com" """
     try:
+        mcp_log("INFO", f"Creating and sharing sheet with email: {email}")
         sheets_service = get_sheets_service()
         drive_service = get_drive_service()
 
         # Create a new spreadsheet
+        mcp_log("INFO", f"Creating spreadsheet with title: {title}")
         spreadsheet = sheets_service.spreadsheets().create(body={
             'properties': {'title': 'F1 Standings'}
         }).execute()
+        mcp_log("INFO", f"Spreadsheet created with ID: {spreadsheet['spreadsheetId']}")
         spreadsheet_id = spreadsheet['spreadsheetId']
 
         # Write data
+        mcp_log("INFO", f"Writing data to spreadsheet")
         sheets_service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id,
             range='A1',
             valueInputOption='RAW',
             body={'values': data}
         ).execute()
+        mcp_log("INFO", f"Data written to spreadsheet")
 
         # Share the spreadsheet
+        mcp_log("INFO", f"Sharing spreadsheet with email: {email}")
         drive_service.permissions().create(
             fileId=spreadsheet_id,
             body={'type': 'user', 'role': 'writer', 'emailAddress': email},
             fields='id'
         ).execute()
-
+        mcp_log("INFO", f"Spreadsheet shared with {email}")
         return f"Sheet created and shared with {email}. Link: https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
     except Exception as e:
         return f"Error creating/sharing sheet: {str(e)}"

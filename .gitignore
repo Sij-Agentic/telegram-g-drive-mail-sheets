@@ -4,3 +4,5 @@ __pycache__/
 /documents/
 /faiss_index/
 service_account.json
+client_secret.json
+token.pickle
