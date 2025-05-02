@@ -3,3 +3,4 @@ __pycache__/
 .env
 /documents/
 /faiss_index/
+service_account.json

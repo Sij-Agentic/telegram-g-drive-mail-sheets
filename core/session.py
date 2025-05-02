@@ -3,45 +3,31 @@
 import os
 import sys
 from typing import Optional, Any, List, Dict
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from mcp import ClientSession
+from mcp.client.sse import sse_client
 
 
 class MCP:
     """
-    Lightweight wrapper for one-time MCP tool calls using stdio transport.
-    Each call spins up a new subprocess and terminates cleanly.
+    Lightweight wrapper for one-time MCP tool calls using SSE transport.
+    Each call connects to the SSE server and terminates cleanly.
     """
 
     def __init__(
         self,
-        server_script: str = "mcp_server_2.py",
-        working_dir: Optional[str] = None,
-        server_command: Optional[str] = None,
+        server_url: str = "http://127.0.0.1:8000/sse",
     ):
-        self.server_script = server_script
-        self.working_dir = working_dir or os.getcwd()
-        self.server_command = server_command or sys.executable
+        self.server_url = server_url
 
     async def list_tools(self):
-        server_params = StdioServerParameters(
-            command=self.server_command,
-            args=[self.server_script],
-            cwd=self.working_dir
-        )
-        async with stdio_client(server_params) as (read, write):
+        async with sse_client(self.server_url) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 tools_result = await session.list_tools()
                 return tools_result.tools
 
     async def call_tool(self, tool_name: str, arguments: dict) -> Any:
-        server_params = StdioServerParameters(
-            command=self.server_command,
-            args=[self.server_script],
-            cwd=self.working_dir
-        )
-        async with stdio_client(server_params) as (read, write):
+        async with sse_client(self.server_url) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 return await session.call_tool(tool_name, arguments=arguments)
@@ -61,13 +47,9 @@ class MultiMCP:
         print("in MultiMCP initialize")
         for config in self.server_configs:
             try:
-                params = StdioServerParameters(
-                    command=sys.executable,
-                    args=[config["script"]],
-                    cwd=config.get("cwd", os.getcwd())
-                )
-                print(f"→ Scanning tools from: {config['script']} in {params.cwd}")
-                async with stdio_client(params) as (read, write):
+                server_url = config["url"]
+                print(f"→ Scanning tools from: {server_url}")
+                async with sse_client(server_url) as (read, write):
                     print("Connection established, creating session...")
                     try:
                         async with ClientSession(read, write) as session:
@@ -84,30 +66,20 @@ class MultiMCP:
                     except Exception as se:
                         print(f"❌ Session error: {se}")
             except Exception as e:
-                print(f"❌ Error initializing MCP server {config['script']}: {e}")
+                print(f"❌ Error initializing MCP server {config['url']}: {e}")
 
     async def call_tool(self, tool_name: str, arguments: dict) -> Any:
-        entry = self.tool_map.get(tool_name)
-        if not entry:
-            raise ValueError(f"Tool '{tool_name}' not found on any server.")
-
-        config = entry["config"]
-        params = StdioServerParameters(
-            command=sys.executable,
-            args=[config["script"]],
-            cwd=config.get("cwd", os.getcwd())
-        )
-
-        async with stdio_client(params) as (read, write):
+        if tool_name not in self.tool_map:
+            raise ValueError(f"Tool {tool_name} not found in any server.")
+        config = self.tool_map[tool_name]["config"]
+        server_url = config["url"]
+        async with sse_client(server_url) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
-                return await session.call_tool(tool_name, arguments)
+                return await session.call_tool(tool_name, arguments=arguments)
 
-    async def list_all_tools(self) -> List[str]:
-        return list(self.tool_map.keys())
-
-    def get_all_tools(self) -> List[Any]:
-        return [entry["tool"] for entry in self.tool_map.values()]
+    def get_all_tools(self):
+        return [tool["tool"] for tool in self.tool_map.values()]
 
     async def shutdown(self):
         pass  # no persistent sessions to close

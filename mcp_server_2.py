@@ -2,12 +2,9 @@ from mcp.server.fastmcp import FastMCP, Image
 from mcp.server.fastmcp.prompts import base
 from mcp.types import TextContent
 from mcp import types
-from PIL import Image as PILImage
-import math
 import sys
 import os
 import json
-import faiss
 import numpy as np
 from pathlib import Path
 import requests
@@ -17,15 +14,62 @@ from models import AddInput, AddOutput, SqrtInput, SqrtOutput, StringsToIntsInpu
 from tqdm import tqdm
 import hashlib
 from pydantic import BaseModel
-import subprocess
-import sqlite3
 import trafilatura
-import pymupdf4llm
 import re
 import base64 # ollama needs base64-encoded-image
+from dotenv import load_dotenv
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
 
+from mcp.server.sse import SseServerTransport
+from mcp.server import Server
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.routing import Mount, Route
+import pickle
+import uvicorn
 
-mcp = FastMCP("Calculator")
+# Load environment variables
+load_dotenv()
+
+# Google Sheets API setup
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
+TOKEN_PICKLE = 'token.pickle'
+CLIENT_SECRET_FILE = os.getenv('GOOGLE_CLIENT_SECRET_FILE', 'client_secret.json')
+
+def get_sheets_service():
+    creds = None
+    if os.path.exists(TOKEN_PICKLE):
+        with open(TOKEN_PICKLE, 'rb') as token:
+            creds = pickle.load(token)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
+            creds = flow.run_local_server(port=0)
+        with open(TOKEN_PICKLE, 'wb') as token:
+            pickle.dump(creds, token)
+    return build('sheets', 'v4', credentials=creds)
+
+def get_drive_service():
+    creds = None
+    if os.path.exists(TOKEN_PICKLE):
+        with open(TOKEN_PICKLE, 'rb') as token:
+            creds = pickle.load(token)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
+            creds = flow.run_local_server(port=0)
+        with open(TOKEN_PICKLE, 'wb') as token:
+            pickle.dump(creds, token)
+    return build('drive', 'v3', credentials=creds)
+
+mcp = FastMCP("Sheets")
 
 EMBED_URL = "http://localhost:11434/api/embeddings"
 OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
@@ -94,143 +138,6 @@ Just respond in one word (Yes or No), and do not provide any further explanation
     return reply.startswith("yes")
 
 
-
-@mcp.tool()
-def search_documents(query: str) -> list[str]:
-    """Search indexed documents for relevant content. Usage: search_documents|query="india Current GDP" """
-    ensure_faiss_ready()
-    mcp_log("SEARCH", f"Query: {query}")
-    try:
-        index = faiss.read_index(str(ROOT / "faiss_index" / "index.bin"))
-        metadata = json.loads((ROOT / "faiss_index" / "metadata.json").read_text())
-        query_vec = get_embedding(query).reshape(1, -1)
-        D, I = index.search(query_vec, k=5)
-        results = []
-        for idx in I[0]:
-            data = metadata[idx]
-            results.append(f"{data['chunk']}\n[Source: {data['doc']}, ID: {data['chunk_id']}]")
-        return results
-    except Exception as e:
-        return [f"ERROR: Failed to search: {str(e)}"]
-
-
-def caption_image(img_url_or_path: str) -> str:
-    mcp_log("CAPTION", f"🖼️ Attempting to caption image: {img_url_or_path}")
-
-    full_path = Path(__file__).parent / "documents" / img_url_or_path
-    full_path = full_path.resolve()
-
-    if not full_path.exists():
-        mcp_log("ERROR", f"❌ Image file not found: {full_path}")
-        return f"[Image file not found: {img_url_or_path}]"
-
-    try:
-        if img_url_or_path.startswith("http"): # for extract_web_pages
-            response = requests.get(img_url_or_path)
-            encoded_image = base64.b64encode(response.content).decode("utf-8")
-        else:
-            with open(full_path, "rb") as img_file:
-                encoded_image = base64.b64encode(img_file.read()).decode("utf-8")
-
-        # Set stream=True to get the full generator-style output
-        with requests.post(OLLAMA_URL, json={
-            "model": GEMMA_MODEL,
-            "prompt": "If there is lot of text in the image, then ONLY reply back with exact text in the image, else Describe the image such that your response can replace 'alt-text' for it. Only explain the contents of the image and provide no further explaination.",
-            "images": [encoded_image],
-            "stream": True
-        }, stream=True) as response:
-
-            caption_parts = []
-            for line in response.iter_lines():
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                    caption_parts.append(data.get("response", ""))
-                    if data.get("done", False):
-                        break
-                except json.JSONDecodeError:
-                    continue  # silently skip malformed lines
-
-            caption = "".join(caption_parts).strip()
-            mcp_log("CAPTION", f"✅ Caption generated: {caption}")
-            return caption if caption else "[No caption returned]"
-
-    except Exception as e:
-        mcp_log("ERROR", f"⚠️ Failed to caption image {img_url_or_path}: {e}")
-        return f"[Image could not be processed: {img_url_or_path}]"
-
-
-
-
-
-def replace_images_with_captions(markdown: str) -> str:
-    def replace(match):
-        alt, src = match.group(1), match.group(2)
-        try:
-            caption = caption_image(src)
-            # Attempt to delete only if local and file exists
-            if not src.startswith("http"):
-                img_path = Path(__file__).parent / "documents" / src
-                if img_path.exists():
-                    img_path.unlink()
-                    mcp_log("INFO", f"🗑️ Deleted image after captioning: {img_path}")
-            return f"**Image:** {caption}"
-        except Exception as e:
-            mcp_log("WARN", f"Image deletion failed: {e}")
-            return f"[Image could not be processed: {src}]"
-
-    return re.sub(r'!\[(.*?)\]\((.*?)\)', replace, markdown)
-
-
-@mcp.tool()
-def extract_webpage(input: UrlInput) -> MarkdownOutput:
-    """Extract and convert webpage content to markdown. Usage: extract_webpage|input={"url": "https://example.com"}"""
-
-    downloaded = trafilatura.fetch_url(input.url)
-    if not downloaded:
-        return MarkdownOutput(markdown="Failed to download the webpage.")
-
-    markdown = trafilatura.extract(
-        downloaded,
-        include_comments=False,
-        include_tables=True,
-        include_images=True,
-        output_format='markdown'
-    ) or ""
-
-    markdown = replace_images_with_captions(markdown)
-    return MarkdownOutput(markdown=markdown)
-
-@mcp.tool()
-def extract_pdf(input: FilePathInput) -> MarkdownOutput:
-    """Convert PDF file content to markdown format. Usage: extract_pdf|input={"file_path": "documents/dlf.pdf"}"""
-
-    if not os.path.exists(input.file_path):
-        return MarkdownOutput(markdown=f"File not found: {input.file_path}")
-
-    ROOT = Path(__file__).parent.resolve()
-    global_image_dir = ROOT / "documents" / "images"
-    global_image_dir.mkdir(parents=True, exist_ok=True)
-
-    # Actual markdown with relative image paths
-    markdown = pymupdf4llm.to_markdown(
-        input.file_path,
-        write_images=True,
-        image_path=str(global_image_dir)
-    )
-
-    # Re-point image links in the markdown
-    markdown = re.sub(
-        r'!\[\]\((.*?/images/)([^)]+)\)',
-        r'![](images/\2)',
-        markdown.replace("\\", "/")
-    )
-
-    markdown = replace_images_with_captions(markdown)
-    return MarkdownOutput(markdown=markdown)
-
-
 def semantic_merge(text: str) -> list[str]:
     """Splits text semantically using LLM: detects second topic and reuses leftover intelligently."""
     WORD_LIMIT = 512
@@ -296,96 +203,6 @@ Keep markdown formatting intact.
     return final_chunks
 
 
-
-
-
-
-
-def process_documents():
-    """Process documents and create FAISS index using unified multimodal strategy."""
-    mcp_log("INFO", "Indexing documents with unified RAG pipeline...")
-    ROOT = Path(__file__).parent.resolve()
-    DOC_PATH = ROOT / "documents"
-    INDEX_CACHE = ROOT / "faiss_index"
-    INDEX_CACHE.mkdir(exist_ok=True)
-    INDEX_FILE = INDEX_CACHE / "index.bin"
-    METADATA_FILE = INDEX_CACHE / "metadata.json"
-    CACHE_FILE = INDEX_CACHE / "doc_index_cache.json"
-
-    def file_hash(path):
-        return hashlib.md5(Path(path).read_bytes()).hexdigest()
-
-    CACHE_META = json.loads(CACHE_FILE.read_text()) if CACHE_FILE.exists() else {}
-    metadata = json.loads(METADATA_FILE.read_text()) if METADATA_FILE.exists() else []
-    index = faiss.read_index(str(INDEX_FILE)) if INDEX_FILE.exists() else None
-
-    for file in DOC_PATH.glob("*.*"):
-        fhash = file_hash(file)
-        if file.name in CACHE_META and CACHE_META[file.name] == fhash:
-            mcp_log("SKIP", f"Skipping unchanged file: {file.name}")
-            continue
-
-        mcp_log("PROC", f"Processing: {file.name}")
-        try:
-            ext = file.suffix.lower()
-            markdown = ""
-
-            if ext == ".pdf":
-                mcp_log("INFO", f"Using MuPDF4LLM to extract {file.name}")
-                markdown = extract_pdf(FilePathInput(file_path=str(file))).markdown
-
-            elif ext in [".html", ".htm", ".url"]:
-                mcp_log("INFO", f"Using Trafilatura to extract {file.name}")
-                markdown = extract_webpage(UrlInput(url=file.read_text().strip())).markdown
-
-            else:
-                # Fallback to MarkItDown for other formats
-                converter = MarkItDown()
-                mcp_log("INFO", f"Using MarkItDown fallback for {file.name}")
-                markdown = converter.convert(str(file)).text_content
-
-            if not markdown.strip():
-                mcp_log("WARN", f"No content extracted from {file.name}")
-                continue
-
-            if len(markdown.split()) < 10:
-                mcp_log("WARN", f"Content too short for semantic merge in {file.name} → Skipping chunking.")
-                chunks = [markdown.strip()]
-            else:
-                mcp_log("INFO", f"Running semantic merge on {file.name} with {len(markdown.split())} words")
-                chunks = semantic_merge(markdown)
-
-
-            embeddings_for_file = []
-            new_metadata = []
-            for i, chunk in enumerate(tqdm(chunks, desc=f"Embedding {file.name}")):
-                embedding = get_embedding(chunk)
-                embeddings_for_file.append(embedding)
-                new_metadata.append({
-                    "doc": file.name,
-                    "chunk": chunk,
-                    "chunk_id": f"{file.stem}_{i}"
-                })
-
-            if embeddings_for_file:
-                if index is None:
-                    dim = len(embeddings_for_file[0])
-                    index = faiss.IndexFlatL2(dim)
-                index.add(np.stack(embeddings_for_file))
-                metadata.extend(new_metadata)
-                CACHE_META[file.name] = fhash
-
-                # ✅ Immediately save index and metadata
-                CACHE_FILE.write_text(json.dumps(CACHE_META, indent=2))
-                METADATA_FILE.write_text(json.dumps(metadata, indent=2))
-                faiss.write_index(index, str(INDEX_FILE))
-                mcp_log("SAVE", f"Saved FAISS index and metadata after processing {file.name}")
-
-        except Exception as e:
-            mcp_log("ERROR", f"Failed to process {file.name}: {e}")
-
-
-
 def ensure_faiss_ready():
     from pathlib import Path
     index_path = ROOT / "faiss_index" / "index.bin"
@@ -397,27 +214,75 @@ def ensure_faiss_ready():
         mcp_log("INFO", "Index already exists. Skipping regeneration.")
 
 
-if __name__ == "__main__":
-    print("STARTING THE SERVER AT AMAZING LOCATION")
+@mcp.tool()
+def create_and_share_sheet(data: list, email: str) -> str:
+    """Create a new Google Sheet, write data, and share it. Usage: create_and_share_sheet|data=[["Header1", "Header2"], ["Data1", "Data2"]]|email="example@example.com" """
+    try:
+        sheets_service = get_sheets_service()
+        drive_service = get_drive_service()
 
-    if len(sys.argv) > 1 and sys.argv[1] == "dev":
-        mcp.run() # Run without transport for dev server
-    else:
-        # Start the server in a separate thread
-        import threading
-        server_thread = threading.Thread(target=lambda: mcp.run(transport="stdio"))
-        server_thread.daemon = True
-        server_thread.start()
-        
-        # Wait a moment for the server to start
-        time.sleep(2)
-        
-        # Process documents after server is running
-        process_documents()
-        
-        # Keep the main thread alive
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            print("\nShutting down...")
+        # Create a new spreadsheet
+        spreadsheet = sheets_service.spreadsheets().create(body={
+            'properties': {'title': 'F1 Standings'}
+        }).execute()
+        spreadsheet_id = spreadsheet['spreadsheetId']
+
+        # Write data
+        sheets_service.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id,
+            range='A1',
+            valueInputOption='RAW',
+            body={'values': data}
+        ).execute()
+
+        # Share the spreadsheet
+        drive_service.permissions().create(
+            fileId=spreadsheet_id,
+            body={'type': 'user', 'role': 'writer', 'emailAddress': email},
+            fields='id'
+        ).execute()
+
+        return f"Sheet created and shared with {email}. Link: https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
+    except Exception as e:
+        return f"Error creating/sharing sheet: {str(e)}"
+
+
+def create_starlette_app(mcp_server: Server, *, debug: bool = False) -> Starlette:
+    """Create a Starlette application that can serve the MCP server with SSE."""
+    sse = SseServerTransport("/messages/")
+
+    async def handle_sse(request: Request) -> None:
+        async with sse.connect_sse(
+                request.scope,
+                request.receive,
+                request._send,
+        ) as (read_stream, write_stream):
+            await mcp_server.run(
+                read_stream,
+                write_stream,
+                mcp_server.create_initialization_options(),
+            )
+
+    return Starlette(
+        debug=debug,
+        routes=[
+            Route("/sse", endpoint=handle_sse),
+            Mount("/messages/", app=sse.handle_post_message),
+        ],
+    )
+
+if __name__ == "__main__":
+    print("STARTING Sheets Server on port 8001")
+    #mcp.run(transport="sse")
+
+    mcp_server = mcp._mcp_server
+    
+    # Create Starlette app with SSE support
+    starlette_app = create_starlette_app(mcp_server, debug=True)
+    
+    port = 8001
+    print(f"Starting MCP server with SSE transport on port {port}...")
+    print(f"SSE endpoint available at: http://localhost:{port}/sse")
+    
+    # Run the server using uvicorn
+    uvicorn.run(starlette_app, host="127.0.0.1", port=port)

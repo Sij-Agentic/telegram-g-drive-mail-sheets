@@ -4,6 +4,9 @@ import asyncio
 import yaml
 from core.loop import AgentLoop
 from core.session import MultiMCP
+from telegram import Bot, Update
+from telegram.ext import Updater, MessageHandler, Filters
+import os
 
 def log(stage: str, msg: str):
     """Simple timestamped console logger."""
@@ -11,10 +14,10 @@ def log(stage: str, msg: str):
     now = datetime.datetime.now().strftime("%H:%M:%S")
     print(f"[{now}] [{stage}] {msg}")
 
-
-async def main():
+async def run_agent_with_input(user_input: str):
+    """Run the agent with the provided user input."""
     print("🧠 Cortex-R Agent Ready")
-    user_input = input("🧑 What do you want to solve today? → ")
+    log("info", f"Processing query: {user_input}")
 
     # Load MCP server configs from profiles.yaml
     with open("config/profiles.yaml", "r") as f:
@@ -22,31 +25,37 @@ async def main():
         mcp_servers = profile.get("mcp_servers", [])
 
     multi_mcp = MultiMCP(server_configs=mcp_servers)
-    print("Agent before initialize")
+    log("info", "Initializing MultiMCP...")
     await multi_mcp.initialize()
 
     agent = AgentLoop(
         user_input=user_input,
-        dispatcher=multi_mcp  # now uses dynamic MultiMCP
+        dispatcher=multi_mcp
     )
 
     try:
         final_response = await agent.run()
-        print("\n💡 Final Answer:\n", final_response.replace("FINAL_ANSWER:", "").strip())
-
+        log("success", f"Final Answer: {final_response.replace('FINAL_ANSWER:', '').strip()}")
+        return final_response
     except Exception as e:
         log("fatal", f"Agent failed: {e}")
         raise
 
+def handle_message(update: Update, context):
+    """Handle incoming Telegram messages."""
+    user_message = update.message.text
+    log("info", f"Received message: {user_message}")
+    asyncio.run(run_agent_with_input(user_message))
+
+def main():
+    """Start the Telegram bot and the agent."""
+    TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+    updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
+    dp = updater.dispatcher
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+    log("info", "Bot started polling...")
+    updater.start_polling()
+    updater.idle()
 
 if __name__ == "__main__":
-    asyncio.run(main())
-
-
-# Find the ASCII values of characters in INDIA and then return sum of exponentials of those values.
-# How much Anmol singh paid for his DLF apartment via Capbridge? 
-# What do you know about Don Tapscott and Anthony Williams?
-# What is the relationship between Gensol and Go-Auto?
-# which course are we teaching on Canvas LMS?
-# Summarize this page: https://theschoolof.ai/
-# What is the log value of the amount that Anmol singh paid for his DLF apartment via Capbridge? 
+    main()

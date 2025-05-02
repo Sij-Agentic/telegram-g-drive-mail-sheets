@@ -25,15 +25,12 @@ persona:
   behavior_tags: [rational, focused, tool-using]
 
 mcp_servers:
-  - id: math
-    script: mcp_server_1.py
-    cwd: I:/TSAI/2025/EAG/Session 8/S8
-  - id: documents
-    script: mcp_server_2.py
-    cwd: I:/TSAI/2025/EAG/Session 8/S8
-  - id: websearch
-    script: mcp_server_3.py
-    cwd: I:/TSAI/2025/EAG/Session 8/S8
+  - id: Gmail
+    url: http://127.0.0.1:8000/sse
+  - id: Sheets
+    url: http://127.0.0.1:8001/sse
+  - id: WebSearch
+    url: http://127.0.0.1:8002/sse
 
 
 
