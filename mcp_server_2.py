@@ -223,7 +223,7 @@ def create_and_share_sheet(data: list, email: str) -> str:
         drive_service = get_drive_service()
 
         # Create a new spreadsheet
-        mcp_log("INFO", f"Creating spreadsheet with title: {title}")
+        mcp_log("INFO", f"Creating spreadsheet with title: F1 Standings")
         spreadsheet = sheets_service.spreadsheets().create(body={
             'properties': {'title': 'F1 Standings'}
         }).execute()

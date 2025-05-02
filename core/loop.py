@@ -1,5 +1,3 @@
-# core/loop.py
-
 import asyncio
 from core.context import AgentContext
 from core.session import MultiMCP
@@ -8,13 +6,21 @@ from modules.perception import extract_perception, PerceptionResult
 from modules.action import ToolCallResult, parse_function_call
 from modules.memory import MemoryItem
 import json
+from telegram import Bot
+import os
+
+def send_telegram_message(chat_id, text):
+    TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+    bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    bot.send_message(chat_id=chat_id, text=text)
 
 
 class AgentLoop:
-    def __init__(self, user_input: str, dispatcher: MultiMCP):
+    def __init__(self, user_input: str, dispatcher: MultiMCP, chat_id: int = None):
         self.context = AgentContext(user_input)
         self.mcp = dispatcher
         self.tools = dispatcher.get_all_tools()
+        self.chat_id = chat_id  # Store chat_id
 
     def tool_expects_input(self, tool_name: str) -> bool:
         tool = next((t for t in self.tools if getattr(t, "name", None) == tool_name), None)
@@ -155,6 +161,18 @@ class AgentLoop:
     FINAL_ANSWER: your answer
 
     Otherwise, return the next FUNCTION_CALL."""
+
+                    # After web search
+                    if self.chat_id and tool_name == "web_search":
+                        send_telegram_message(self.chat_id, "🔎 Web search complete.")
+
+                    # After sheet creation
+                    if self.chat_id and tool_name == "create_and_share_sheet":
+                        send_telegram_message(self.chat_id, "📊 Sheet created.")
+
+                    # After email sent
+                    if self.chat_id and tool_name == "send_email":
+                        send_telegram_message(self.chat_id, "✉️ Link emailed.")
                 except Exception as e:
                     print(f"[error] Tool execution failed: {e}")
                     break

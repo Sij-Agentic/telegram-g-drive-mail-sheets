@@ -1,8 +1,6 @@
-# agent.py
-
 import asyncio
 import yaml
-from core.loop import AgentLoop
+from core.loop import AgentLoop, send_telegram_message
 from core.session import MultiMCP
 from telegram import Bot, Update
 from telegram.ext import Updater, MessageHandler, Filters
@@ -15,7 +13,7 @@ def log(stage: str, msg: str):
     now = datetime.datetime.now().strftime("%H:%M:%S")
     print(f"[{now}] [{stage}] {msg}")
 
-async def run_agent_with_input(user_input: str):
+async def run_agent_with_input(user_input: str, chat_id: int):
     """Run the agent with the provided user input."""
     print("🧠 Cortex-R Agent Ready")
     log("info", f"Processing query: {user_input}")
@@ -34,7 +32,8 @@ async def run_agent_with_input(user_input: str):
 
     agent = AgentLoop(
         user_input=user_input,
-        dispatcher=multi_mcp
+        dispatcher=multi_mcp,
+        chat_id=chat_id
     )
     log("info", "AgentLoop created. Starting agent.run()...")
 
@@ -50,9 +49,12 @@ async def run_agent_with_input(user_input: str):
 def handle_message(update: Update, context):
     """Handle incoming Telegram messages."""
     user_message = update.message.text
+    chat_id = update.message.chat_id
     log("info", f"Received message: {user_message}")
+    send_telegram_message(chat_id, "✅ Message received! Processing...")  # Notify user
+
     try:
-        asyncio.run(run_agent_with_input(user_message))
+        asyncio.run(run_agent_with_input(user_message, chat_id))
     except Exception as e:
         log("fatal", f"Error handling message: {e}")
         log("fatal", traceback.format_exc())
